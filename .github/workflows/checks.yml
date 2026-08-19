@@ -21,3 +21,76 @@ jobs:
           python-version: "3.x"
       - run: pip install prek
       - run: prek run --all-files --show-diff-on-failure --color always
+
+  # The proofs, on a machine that is not this desk.
+  #
+  # Until now nothing here was gated by anything but a person running it locally, and the
+  # record shows what that costs: the command loop had run on Windows and macOS and never on
+  # Linux, which docs/runs.md calls this repository's primary target. Two of six
+  # platform-by-payload cells were empty and stayed empty because nobody's desk was a Linux
+  # one.
+  #
+  # Two things a plain checkout does not have and this job must supply.
+  #
+  # iceoryx2 is dlopened and never vendored -- that is the point of the stub table -- so CI
+  # builds it from source at the version the proofs were run against. QCBOR is a manifest
+  # project checked out by repo at libs/qcbor, which exists in a workspace and not in a bare
+  # clone, so CI clones it at the commit the manifest pins. Pinned by commit in both places,
+  # because a tag can move.
+  proofs:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QCBOR at the commit the manifest pins
+        run: |
+          git clone --no-checkout https://github.com/laurencelundblade/QCBOR.git libs/qcbor
+          git -C libs/qcbor checkout 930708bb86481e88879eb1d87fd4d664f1d69503
+
+      - uses: dtolnay/rust-toolchain@stable
+      - name: iceoryx2 v0.9.3, built from source
+        run: |
+          git clone --depth 1 --branch v0.9.3 https://github.com/eclipse-iceoryx/iceoryx2.git /tmp/iceoryx2
+          cargo build --release -p iceoryx2-ffi-c --manifest-path /tmp/iceoryx2/Cargo.toml
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+
+      # Both payload variants: the fixed 40-byte Snapshot and the byte slice the command
+      # envelope needs. Each subscriber is backgrounded and the publisher's exit code is what
+      # the step is judged on, because a publisher that confirms every round trip is the claim.
+      - name: Snapshot proof (FIXED_SIZE)
+        run: |
+          export WEFT_ICEORYX2_PATH=$(ls /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.{so,dylib} 2>/dev/null | head -1)
+          ./build/weft-harness-subscriber 8 &
+          sleep 2
+          ./build/weft-harness-publisher 8
+
+      - name: Command/reply proof (DYNAMIC)
+        run: |
+          export WEFT_ICEORYX2_PATH=$(ls /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.{so,dylib} 2>/dev/null | head -1)
+          ./build/weft-harness-command_subscriber 8 &
+          sleep 2
+          ./build/weft-harness-command_publisher 8
+
+      # The name list in bus.hpp, which every run so far skipped.
+      #
+      # WEFT_ICEORYX2_PATH is prepended and tried first, so setting it means the platform's
+      # own library names are never reached. That is exactly how `.so` survived in the macOS
+      # list until a run without the override found it, and the Windows `.dll` name has still
+      # never been exercised for the same reason. This step unsets the override and makes the
+      # loader search, so the list is under test rather than under description.
+      - name: The fallback names, with no override
+        run: |
+          unset WEFT_ICEORYX2_PATH
+          export LD_LIBRARY_PATH=/tmp/iceoryx2/target/release
+          export DYLD_LIBRARY_PATH=/tmp/iceoryx2/target/release
+          ./build/weft-harness-command_subscriber 4 &
+          sleep 2
+          ./build/weft-harness-command_publisher 4
