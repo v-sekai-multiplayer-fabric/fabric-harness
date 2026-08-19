@@ -148,3 +148,36 @@ jobs:
           "$BIN/weft-harness-command_subscriber" 4 &
           sleep 2
           "$BIN/weft-harness-command_publisher" 4
+
+  # PROBE, allowed to fail: does clang-cl build this?
+  #
+  # llvm-mingw works and costs a 100 MB download per Windows run. clang-cl is Clang with an
+  # MSVC-compatible driver and ships with the runner image, so if it builds this the download
+  # goes away and the Windows binaries match the ABI everything else on that platform uses.
+  #
+  # The open question is not the parser. clang-cl accepts __attribute__((weak)) because it is
+  # Clang underneath. It is the linker: weak symbols are an ELF concept, and COFF has no direct
+  # equivalent, so the generated stub table may parse and then fail to link -- which is the
+  # answer this job exists to get rather than to guess.
+  clang-cl-probe:
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: QCBOR at the commit the manifest pins
+        run: |
+          git clone --no-checkout https://github.com/laurencelundblade/QCBOR.git libs/qcbor
+          git -C libs/qcbor checkout 930708bb86481e88879eb1d87fd4d664f1d69503
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Is clang-cl even here
+        run: clang-cl --version || echo "clang-cl is not on this image"
+      - name: Build with clang-cl
+        run: |
+          cmake -B build-clangcl -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+          cmake --build build-clangcl -j
+      - name: What it produced
+        run: ls -la build-clangcl/*.a build-clangcl/*.lib build-clangcl/*.exe 2>/dev/null || ls -la build-clangcl
