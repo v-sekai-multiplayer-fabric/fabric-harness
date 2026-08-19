@@ -194,14 +194,19 @@ jobs:
           7z x -o/c/ /tmp/llvm-mingw.zip > /dev/null
           echo "/c/llvm-mingw-20260812-ucrt-x86_64/bin" >> "$GITHUB_PATH"
 
-      - uses: ilammy/msvc-dev-cmd@v1
-        if: matrix.toolchain != 'llvm-mingw'
-
+      # iceoryx2 is built before the MSVC environment is set up, not after. msvc-dev-cmd
+      # exports LIB, INCLUDE and a PATH for the C++ toolchain, and with those in scope rustc
+      # could not link its own build scripts: `linking with link.exe failed` while compiling
+      # `quote`, which is a proc-macro crate and nothing to do with this repository. The
+      # llvm-mingw leg does not run that action and built fine, which is what named the cause.
       - uses: dtolnay/rust-toolchain@stable
       - name: iceoryx2 v0.9.3, built from source
         run: |
           git clone --depth 1 --branch v0.9.3 https://github.com/eclipse-iceoryx/iceoryx2.git /tmp/iceoryx2
           cargo build --release -p iceoryx2-ffi-c --manifest-path /tmp/iceoryx2/Cargo.toml
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.toolchain != 'llvm-mingw'
 
       - name: Build
         run: |
