@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -149,35 +149,82 @@ jobs:
           sleep 2
           "$BIN/weft-harness-command_publisher" 4
 
-  # PROBE, allowed to fail: does clang-cl build this?
+  # Windows, on all three toolchains that matter there.
   #
-  # llvm-mingw works and costs a 100 MB download per Windows run. clang-cl is Clang with an
-  # MSVC-compatible driver and ships with the runner image, so if it builds this the download
-  # goes away and the Windows binaries match the ABI everything else on that platform uses.
+  # A Windows caller may reasonably arrive with any of llvm-mingw, clang-cl or MSVC, and the
+  # generated dispatch table has to compile under all three or the choice becomes a hidden
+  # requirement. It did not: the generator writes __attribute__((weak)) on every forwarding
+  # declaration, so MSVC stopped at the first one with 'unknown override specifier'.
   #
-  # The open question is not the parser. clang-cl accepts __attribute__((weak)) because it is
-  # Clang underneath. It is the linker: weak symbols are an ELF concept, and COFF has no direct
-  # equivalent, so the generated stub table may parse and then fail to link -- which is the
-  # answer this job exists to get rather than to guess.
-  clang-cl-probe:
+  # src/stubgen_compat.h defines the attribute away under _MSC_VER. It is not load-bearing
+  # here -- Chromium marks the declaration weak so a directly linked real symbol can override
+  # the stub, and this repository never links iceoryx2 at all -- so on MSVC it becomes an
+  # ordinary extern.
+  #
+  # Building is not running. Each of the three runs the command/reply proof afterwards,
+  # because a table that compiles and does not dispatch is the failure this job exists to
+  # catch.
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [llvm-mingw, clang-cl, msvc]
     runs-on: windows-latest
-    continue-on-error: true
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+
       - name: QCBOR at the commit the manifest pins
         run: |
           git clone --no-checkout https://github.com/laurencelundblade/QCBOR.git libs/qcbor
           git -C libs/qcbor checkout 930708bb86481e88879eb1d87fd4d664f1d69503
-      - uses: ilammy/msvc-dev-cmd@v1
-      - name: Is clang-cl even here
-        run: clang-cl --version || echo "clang-cl is not on this image"
-      - name: Build with clang-cl
+
+      # iceoryx2 v0.9.3 creates its shared memory under a hardcoded C:\Temp and fails with no
+      # clear error when it is absent -- iceoryx2 issue 1868, closed after v0.9.3.
+      - name: iceoryx2's hardcoded C:\Temp
+        run: mkdir -p /c/Temp/iceoryx2/shm
+
+      - name: llvm-mingw
+        if: matrix.toolchain == 'llvm-mingw'
         run: |
-          cmake -B build-clangcl -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
-          cmake --build build-clangcl -j
-      - name: What it produced
-        run: ls -la build-clangcl/*.a build-clangcl/*.lib build-clangcl/*.exe 2>/dev/null || ls -la build-clangcl
+          curl -sSL -o /tmp/llvm-mingw.zip \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20260812/llvm-mingw-20260812-ucrt-x86_64.zip
+          7z x -o/c/ /tmp/llvm-mingw.zip > /dev/null
+          echo "/c/llvm-mingw-20260812-ucrt-x86_64/bin" >> "$GITHUB_PATH"
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.toolchain != 'llvm-mingw'
+
+      - uses: dtolnay/rust-toolchain@stable
+      - name: iceoryx2 v0.9.3, built from source
+        run: |
+          git clone --depth 1 --branch v0.9.3 https://github.com/eclipse-iceoryx/iceoryx2.git /tmp/iceoryx2
+          cargo build --release -p iceoryx2-ffi-c --manifest-path /tmp/iceoryx2/Cargo.toml
+
+      - name: Build
+        run: |
+          case "${{ matrix.toolchain }}" in
+            llvm-mingw) CC=clang;    CXX=clang++   ;;
+            clang-cl)   CC=clang-cl; CXX=clang-cl  ;;
+            msvc)       CC=cl;       CXX=cl        ;;
+          esac
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX
+          cmake --build build -j
+
+      - name: Command/reply proof (DYNAMIC)
+        run: |
+          export WEFT_ICEORYX2_PATH=/tmp/iceoryx2/target/release/iceoryx2_ffi_c.dll
+          ./build/weft-harness-command_subscriber.exe 8 &
+          sleep 2
+          ./build/weft-harness-command_publisher.exe 8
+
+      - name: The fallback name, with no override
+        run: |
+          unset WEFT_ICEORYX2_PATH
+          export PATH="/tmp/iceoryx2/target/release:$PATH"
+          ./build/weft-harness-command_subscriber.exe 4 &
+          sleep 2
+          ./build/weft-harness-command_publisher.exe 4

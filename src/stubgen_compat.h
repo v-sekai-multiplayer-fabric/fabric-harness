@@ -15,6 +15,25 @@
  * path, so it stays empty. */
 #define DISABLE_CFI_ICALL
 
+/* MSVC has no __attribute__, and the generator writes __attribute__((weak)) on every
+ * forwarding declaration it emits. cl.exe stops at the first one with 'unknown override
+ * specifier' and then reports the definition below it as a redefinition, because the
+ * declaration it could not parse left the body standing alone -- eighty errors in a file
+ * nobody wrote.
+ *
+ * The attribute is not load-bearing here. Chromium marks the forward declaration weak so a
+ * directly linked real symbol can override the stub; this repository never links iceoryx2 at
+ * all, which is the entire point of the dispatch table. So on MSVC the attribute is defined
+ * away, and the declaration becomes an ordinary extern.
+ *
+ * `__attribute__` is not a reserved identifier under MSVC, so defining it is legal there and
+ * invisible to every other compiler. This is deliberately narrower than a general shim: it
+ * removes exactly the one construct MSVC lacks, in the one file the generator writes.
+ */
+#ifdef _MSC_VER
+#define __attribute__(x)
+#endif
+
 /* The umbrella initializer needs a reachable namespace name. `-p native/harness` makes
  * the generator write `native_harness`. The guard keeps this header valid in C, because
  * an editor indexes it on its own. */
