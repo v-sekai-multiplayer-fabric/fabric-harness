@@ -77,10 +77,21 @@ jobs:
       # build/. Resolved once here rather than guessed at in four steps.
       - name: Where things landed
         run: |
-          BIN=build; [ -d build/Release ] && BIN=build/Release
-          LIB=$(ls /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.so \
+          # Written for `bash -e -o pipefail`, which is what the runner uses. `ls a b c` exits
+          # non-zero when any path is missing even though it printed the one that exists, and
+          # `[ -d x ] && y=z` exits non-zero when the test is false. Both end the step. An
+          # explicit if is the version that survives the shell this actually runs in.
+          if [ -d build/Release ]; then BIN=build/Release; else BIN=build; fi
+          LIB=
+          for f in /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.so \
                    /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.dylib \
-                   /tmp/iceoryx2/target/release/iceoryx2_ffi_c.dll 2>/dev/null | head -1)
+                   /tmp/iceoryx2/target/release/iceoryx2_ffi_c.dll; do
+            if [ -f "$f" ]; then LIB=$f; break; fi
+          done
+          if [ -z "$LIB" ]; then
+            echo "no iceoryx2 library was built"; ls -la /tmp/iceoryx2/target/release || true
+            exit 1
+          fi
           echo "BIN=$BIN"                  >> "$GITHUB_ENV"
           echo "WEFT_ICEORYX2_PATH=$LIB"   >> "$GITHUB_ENV"
           echo "IOX_DIR=$(dirname "$LIB")" >> "$GITHUB_ENV"
