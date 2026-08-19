@@ -61,6 +61,19 @@ jobs:
         if: runner.os == 'Windows'
         run: mkdir -p /c/Temp/iceoryx2/shm
 
+      # MSVC cannot build this. Chromium's posix_stubs generator emits
+      # __attribute__((weak)) on every forwarding thunk, which is a GCC and Clang extension,
+      # so cl.exe stops at 'unknown override specifier' on the first one. That is why the
+      # Windows run docs/runs.md records used llvm-mingw rather than MSVC, and the toolchain
+      # is part of the claim rather than a detail of somebody's desk.
+      - name: llvm-mingw, because the generated stubs are GCC-flavoured
+        if: runner.os == 'Windows'
+        run: |
+          curl -sSL -o /tmp/llvm-mingw.zip \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20260812/llvm-mingw-20260812-ucrt-x86_64.zip
+          7z x -o/c/ /tmp/llvm-mingw.zip > /dev/null
+          echo "/c/llvm-mingw-20260812-ucrt-x86_64/bin" >> "$GITHUB_PATH"
+
       - uses: dtolnay/rust-toolchain@stable
       - name: iceoryx2 v0.9.3, built from source
         run: |
@@ -69,8 +82,16 @@ jobs:
 
       - name: Build
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release -j
+          # Ninja everywhere, so the layout is build/ on all three and the generator is not a
+          # per-platform difference. On Windows that also keeps MSVC out of it: without an
+          # explicit generator CMake picks Visual Studio, which cannot compile the stubs.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          else
+            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          fi
+          cmake --build build -j
 
       # Where the binaries and the library land differs by platform and by generator: MSVC is
       # multi-config, so it writes build/Release/ where the single-config generators write
@@ -78,10 +99,9 @@ jobs:
       - name: Where things landed
         run: |
           # Written for `bash -e -o pipefail`, which is what the runner uses. `ls a b c` exits
-          # non-zero when any path is missing even though it printed the one that exists, and
-          # `[ -d x ] && y=z` exits non-zero when the test is false. Both end the step. An
-          # explicit if is the version that survives the shell this actually runs in.
-          if [ -d build/Release ]; then BIN=build/Release; else BIN=build; fi
+          # non-zero when any path is missing even though it printed the one that exists, so
+          # the loop below is the version that survives the shell this actually runs in.
+          BIN=build
           LIB=
           for f in /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.so \
                    /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.dylib \
