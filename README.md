@@ -17,7 +17,7 @@ message rather than a link error.
 | `Snapshot`, fixed 40-byte struct | `proof/publisher.cpp`, `subscriber.cpp` | Windows, macOS, Linux |
 | byte slice, `run_command_loop`   | `proof/command_*.cpp`                   | Windows, macOS, Linux |
 
-CI runs both proofs on Linux and macOS, and once more with `WEFT_ICEORYX2_PATH` unset so the names in `bus.hpp` are exercised rather than skipped. Windows is still a person's desk, so its `.dll` name is the one entry untested.
+CI runs both proofs on Linux, macOS and Windows, and once more with `WEFT_ICEORYX2_PATH` unset so the names in `bus.hpp` are exercised rather than skipped — every earlier run set the override, which is how a Linux soname survived in the macOS list.
 
 ## Build and run
 

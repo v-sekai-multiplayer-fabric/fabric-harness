@@ -22,27 +22,29 @@ jobs:
       - run: pip install prek
       - run: prek run --all-files --show-diff-on-failure --color always
 
-  # The proofs, on a machine that is not this desk.
+  # The proofs, on machines that are not this desk.
   #
-  # Until now nothing here was gated by anything but a person running it locally, and the
-  # record shows what that costs: the command loop had run on Windows and macOS and never on
-  # Linux, which docs/runs.md calls this repository's primary target. Two of six
-  # platform-by-payload cells were empty and stayed empty because nobody's desk was a Linux
-  # one.
+  # Until this job existed nothing here was gated by anything but a person running it locally,
+  # and the record shows what that cost: the command loop had run on Windows and macOS and
+  # never on Linux, which docs/runs.md calls this repository's primary target.
   #
-  # Two things a plain checkout does not have and this job must supply.
+  # Two things a plain checkout does not have and this job must supply. iceoryx2 is dlopened
+  # and never vendored -- that is the point of the stub table -- so CI builds it from source
+  # at the version the proofs were run against. QCBOR is a manifest project checked out by
+  # repo at libs/qcbor, which exists in a workspace and not in a bare clone, so CI clones it
+  # at the commit the manifest pins. Both by commit, because a tag can move.
   #
-  # iceoryx2 is dlopened and never vendored -- that is the point of the stub table -- so CI
-  # builds it from source at the version the proofs were run against. QCBOR is a manifest
-  # project checked out by repo at libs/qcbor, which exists in a workspace and not in a bare
-  # clone, so CI clones it at the commit the manifest pins. Pinned by commit in both places,
-  # because a tag can move.
+  # Every step runs under bash, including on Windows, so the three platforms differ in the
+  # values below and not in the shape of the job.
   proofs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +52,14 @@ jobs:
         run: |
           git clone --no-checkout https://github.com/laurencelundblade/QCBOR.git libs/qcbor
           git -C libs/qcbor checkout 930708bb86481e88879eb1d87fd4d664f1d69503
+
+      # iceoryx2 v0.9.3 creates its shared memory under a hardcoded C:\Temp on Windows and
+      # fails with no clear error when it is not there -- iceoryx2 issue 1868, closed after
+      # v0.9.3. Every Windows caller hits it until a release past that fix exists, so the
+      # directory is made rather than the failure explained again.
+      - name: iceoryx2's hardcoded C:\Temp
+        if: runner.os == 'Windows'
+        run: mkdir -p /c/Temp/iceoryx2/shm
 
       - uses: dtolnay/rust-toolchain@stable
       - name: iceoryx2 v0.9.3, built from source
@@ -60,37 +70,50 @@ jobs:
       - name: Build
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build -j
+          cmake --build build --config Release -j
+
+      # Where the binaries and the library land differs by platform and by generator: MSVC is
+      # multi-config, so it writes build/Release/ where the single-config generators write
+      # build/. Resolved once here rather than guessed at in four steps.
+      - name: Where things landed
+        run: |
+          BIN=build; [ -d build/Release ] && BIN=build/Release
+          LIB=$(ls /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.so \
+                   /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.dylib \
+                   /tmp/iceoryx2/target/release/iceoryx2_ffi_c.dll 2>/dev/null | head -1)
+          echo "BIN=$BIN"                  >> "$GITHUB_ENV"
+          echo "WEFT_ICEORYX2_PATH=$LIB"   >> "$GITHUB_ENV"
+          echo "IOX_DIR=$(dirname "$LIB")" >> "$GITHUB_ENV"
+          echo "resolved: $BIN, $LIB"
 
       # Both payload variants: the fixed 40-byte Snapshot and the byte slice the command
-      # envelope needs. Each subscriber is backgrounded and the publisher's exit code is what
-      # the step is judged on, because a publisher that confirms every round trip is the claim.
+      # envelope needs. The subscriber is backgrounded and the publisher's exit code is what
+      # the step is judged on, because a publisher confirming every round trip is the claim.
       - name: Snapshot proof (FIXED_SIZE)
         run: |
-          export WEFT_ICEORYX2_PATH=$(ls /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.{so,dylib} 2>/dev/null | head -1)
-          ./build/weft-harness-subscriber 8 &
+          "$BIN/weft-harness-subscriber" 8 &
           sleep 2
-          ./build/weft-harness-publisher 8
+          "$BIN/weft-harness-publisher" 8
 
       - name: Command/reply proof (DYNAMIC)
         run: |
-          export WEFT_ICEORYX2_PATH=$(ls /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.{so,dylib} 2>/dev/null | head -1)
-          ./build/weft-harness-command_subscriber 8 &
+          "$BIN/weft-harness-command_subscriber" 8 &
           sleep 2
-          ./build/weft-harness-command_publisher 8
+          "$BIN/weft-harness-command_publisher" 8
 
-      # The name list in bus.hpp, which every run so far skipped.
+      # The name list in bus.hpp, which every run before this job skipped.
       #
-      # WEFT_ICEORYX2_PATH is prepended and tried first, so setting it means the platform's
-      # own library names are never reached. That is exactly how `.so` survived in the macOS
-      # list until a run without the override found it, and the Windows `.dll` name has still
-      # never been exercised for the same reason. This step unsets the override and makes the
+      # WEFT_ICEORYX2_PATH is prepended and tried first, so setting it means the platform's own
+      # library names are never reached. That is how a Linux soname survived in the macOS list
+      # until a run without the override found it, and why the Windows .dll name had never been
+      # exercised even on a Windows run that passed. This unsets the override and makes the
       # loader search, so the list is under test rather than under description.
       - name: The fallback names, with no override
         run: |
           unset WEFT_ICEORYX2_PATH
-          export LD_LIBRARY_PATH=/tmp/iceoryx2/target/release
-          export DYLD_LIBRARY_PATH=/tmp/iceoryx2/target/release
-          ./build/weft-harness-command_subscriber 4 &
+          export LD_LIBRARY_PATH="$IOX_DIR"
+          export DYLD_LIBRARY_PATH="$IOX_DIR"
+          export PATH="$IOX_DIR:$PATH"
+          "$BIN/weft-harness-command_subscriber" 4 &
           sleep 2
-          ./build/weft-harness-command_publisher 4
+          "$BIN/weft-harness-command_publisher" 4
