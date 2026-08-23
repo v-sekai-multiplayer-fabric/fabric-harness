@@ -123,16 +123,64 @@ private:
 	// and wrong for one reading a message, where truncated and complete need different
 	// answers -- a short message is a broken sender, a missing field is an older one.
 	//
-	// So the whole message is walked once before anything is read from it. The traversal is
-	// QCBOR's own, on a throwaway context, and `Finish` is what reports both a malformed item
-	// and trailing bytes past the end.
+	// So the whole message is walked once before anything is read from it, and the walk has
+	// to answer THREE questions rather than one.
+	//
+	// CORRECTED: THIS USED TO CLAIM `Finish` REPORTED TRAILING BYTES. It does not, and the
+	// comment saying so shipped. `QCBORDecode_GetNext` is called until it stops succeeding,
+	// which CONSUMES a trailing item rather than tripping over it, so `Finish` then sees a
+	// cleanly exhausted buffer and reports success. Measured on a 99-byte encoded map with
+	// one byte appended:
+	//
+	//     trailing 0xFF break stop-code   accepted
+	//     trailing 0x01 integer 1         accepted
+	//     trailing 0xA0 empty map         accepted
+	//     trailing 0x00 integer 0         accepted
+	//
+	// Four of four, where the comment promised a refusal. A caller appending bytes to a
+	// message is a broken sender, and reading the first item and discarding the rest answers
+	// it as though it were a good one.
+	//
+	// The fix took three attempts and the two that failed are recorded here, because each
+	// looked complete:
+	//
+	//     input          top-level items   consumed   Finish   stopped because
+	//     {"a":1}                      1        4/4       ok    NO_MORE_ITEMS
+	//     {"a":1} + 01                 2        5/5       ok    NO_MORE_ITEMS
+	//     {"a":1} + FF                 1        5/5       ok    malformed
+	//
+	// Counting top-level items misses the last row: a stray break is refused by GetNext, so
+	// the walk stops at one item with the byte still there. Comparing the consumed length
+	// misses it too, because QCBOR counts the break as consumed. Only the REASON the walk
+	// stopped separates that row from the first, and only the COUNT separates the second.
+	// Both are needed, which is why neither alone was enough.
 	static bool well_formed(const void *data, std::size_t n) {
 		QCBORDecodeContext c{};
 		QCBORDecode_Init(&c, UsefulBufC{data, n}, QCBOR_DECODE_MODE_NORMAL);
+
 		QCBORItem item;
-		while (QCBORDecode_GetNext(&c, &item) == QCBOR_SUCCESS) {
+		int top_level = 0;
+		QCBORError stopped_because = QCBOR_SUCCESS;
+		for (;;) {
+			stopped_because = QCBORDecode_GetNext(&c, &item);
+			if (stopped_because != QCBOR_SUCCESS) {
+				break;
+			}
+			// A map's own item is at nesting level 0 and its members are at level 1, so one
+			// top-level item is exactly one message however deeply it nests.
+			if (item.uNestingLevel == 0) {
+				top_level++;
+			}
 		}
-		return QCBORDecode_Finish(&c) == QCBOR_SUCCESS;
+
+		// The walk must have run out of items, rather than stopped on one it could not read.
+		if (stopped_because != QCBOR_ERR_NO_MORE_ITEMS) {
+			return false;
+		}
+		if (QCBORDecode_Finish(&c) != QCBOR_SUCCESS) {
+			return false;
+		}
+		return top_level == 1;
 	}
 
 	// A failed lookup leaves the error set, and QCBOR then refuses every later call so one
