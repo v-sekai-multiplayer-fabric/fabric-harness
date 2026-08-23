@@ -117,7 +117,7 @@ endif()
 # the harness has no use for them.
 option(WEFT_HARNESS_PROOF "Build the publish and subscribe proof, and the bench" ON)
 if(WEFT_HARNESS_PROOF)
-    foreach(prog publisher subscriber bench_send command_publisher command_subscriber)
+    foreach(prog publisher subscriber bench_send command_publisher command_subscriber cbor_shape)
         add_executable(weft-harness-${prog} proof/${prog}.cpp)
         target_link_libraries(weft-harness-${prog} PRIVATE weft::harness)
         target_compile_options(weft-harness-${prog} PRIVATE -Wall -Wextra)
