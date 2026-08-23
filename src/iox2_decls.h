@@ -70,6 +70,7 @@ typedef const iox2_port_factory_publisher_builder_h* iox2_port_factory_publisher
 
 struct iox2_port_factory_subscriber_builder_h_t;
 typedef struct iox2_port_factory_subscriber_builder_h_t* iox2_port_factory_subscriber_builder_h;
+typedef const iox2_port_factory_subscriber_builder_h* iox2_port_factory_subscriber_builder_h_ref;
 
 struct iox2_publisher_h_t;
 typedef struct iox2_publisher_h_t* iox2_publisher_h;
