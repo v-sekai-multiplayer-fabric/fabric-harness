@@ -21,3 +21,215 @@ jobs:
           python-version: "3.x"
       - run: pip install prek
       - run: prek run --all-files --show-diff-on-failure --color always
+
+  # The proofs, on machines that are not this desk.
+  #
+  # Until this job existed nothing here was gated by anything but a person running it locally,
+  # and the record shows what that cost: the command loop had run on Windows and macOS and
+  # never on Linux, which docs/runs.md calls this repository's primary target.
+  #
+  # Two things a plain checkout does not have and this job must supply. iceoryx2 is dlopened
+  # and never vendored -- that is the point of the stub table -- so CI builds it from source
+  # at the version the proofs were run against. QCBOR is a manifest project checked out by
+  # repo at libs/qcbor, which exists in a workspace and not in a bare clone, so CI clones it
+  # at the commit the manifest pins. Both by commit, because a tag can move.
+  #
+  # Every step runs under bash, including on Windows, so the three platforms differ in the
+  # values below and not in the shape of the job.
+  proofs:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QCBOR at the commit the manifest pins
+        run: |
+          git clone --no-checkout https://github.com/laurencelundblade/QCBOR.git libs/qcbor
+          git -C libs/qcbor checkout 930708bb86481e88879eb1d87fd4d664f1d69503
+
+      # iceoryx2 v0.9.3 creates its shared memory under a hardcoded C:\Temp on Windows and
+      # fails with no clear error when it is not there -- iceoryx2 issue 1868, closed after
+      # v0.9.3. Every Windows caller hits it until a release past that fix exists, so the
+      # directory is made rather than the failure explained again.
+      - name: iceoryx2's hardcoded C:\Temp
+        if: runner.os == 'Windows'
+        run: mkdir -p /c/Temp/iceoryx2/shm
+
+      # MSVC cannot build this. Chromium's posix_stubs generator emits
+      # __attribute__((weak)) on every forwarding thunk, which is a GCC and Clang extension,
+      # so cl.exe stops at 'unknown override specifier' on the first one. That is why the
+      # Windows run docs/runs.md records used llvm-mingw rather than MSVC, and the toolchain
+      # is part of the claim rather than a detail of somebody's desk.
+      - name: llvm-mingw, because the generated stubs are GCC-flavoured
+        if: runner.os == 'Windows'
+        run: |
+          curl -sSL -o /tmp/llvm-mingw.zip \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20260812/llvm-mingw-20260812-ucrt-x86_64.zip
+          7z x -o/c/ /tmp/llvm-mingw.zip > /dev/null
+          echo "/c/llvm-mingw-20260812-ucrt-x86_64/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - name: iceoryx2 v0.9.3, built from source
+        run: |
+          git clone --depth 1 --branch v0.9.3 https://github.com/eclipse-iceoryx/iceoryx2.git /tmp/iceoryx2
+          cargo build --release -p iceoryx2-ffi-c --manifest-path /tmp/iceoryx2/Cargo.toml
+
+      - name: Build
+        run: |
+          # Ninja everywhere, so the layout is build/ on all three and the generator is not a
+          # per-platform difference. On Windows that also keeps MSVC out of it: without an
+          # explicit generator CMake picks Visual Studio, which cannot compile the stubs.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          else
+            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          fi
+          cmake --build build -j
+
+      # Where the binaries and the library land differs by platform and by generator: MSVC is
+      # multi-config, so it writes build/Release/ where the single-config generators write
+      # build/. Resolved once here rather than guessed at in four steps.
+      - name: Where things landed
+        run: |
+          # Written for `bash -e -o pipefail`, which is what the runner uses. `ls a b c` exits
+          # non-zero when any path is missing even though it printed the one that exists, so
+          # the loop below is the version that survives the shell this actually runs in.
+          BIN=build
+          LIB=
+          for f in /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.so \
+                   /tmp/iceoryx2/target/release/libiceoryx2_ffi_c.dylib \
+                   /tmp/iceoryx2/target/release/iceoryx2_ffi_c.dll; do
+            if [ -f "$f" ]; then LIB=$f; break; fi
+          done
+          if [ -z "$LIB" ]; then
+            echo "no iceoryx2 library was built"; ls -la /tmp/iceoryx2/target/release || true
+            exit 1
+          fi
+          echo "BIN=$BIN"                  >> "$GITHUB_ENV"
+          echo "WEFT_ICEORYX2_PATH=$LIB"   >> "$GITHUB_ENV"
+          echo "IOX_DIR=$(dirname "$LIB")" >> "$GITHUB_ENV"
+          echo "resolved: $BIN, $LIB"
+
+      # Both payload variants: the fixed 40-byte Snapshot and the byte slice the command
+      # envelope needs. The subscriber is backgrounded and the publisher's exit code is what
+      # the step is judged on, because a publisher confirming every round trip is the claim.
+      - name: Snapshot proof (FIXED_SIZE)
+        run: |
+          "$BIN/weft-harness-subscriber" 8 &
+          sleep 2
+          "$BIN/weft-harness-publisher" 8
+
+      - name: Command/reply proof (DYNAMIC)
+        run: |
+          "$BIN/weft-harness-command_subscriber" 8 &
+          sleep 2
+          "$BIN/weft-harness-command_publisher" 8
+
+      # The name list in bus.hpp, which every run before this job skipped.
+      #
+      # WEFT_ICEORYX2_PATH is prepended and tried first, so setting it means the platform's own
+      # library names are never reached. That is how a Linux soname survived in the macOS list
+      # until a run without the override found it, and why the Windows .dll name had never been
+      # exercised even on a Windows run that passed. This unsets the override and makes the
+      # loader search, so the list is under test rather than under description.
+      - name: The fallback names, with no override
+        run: |
+          unset WEFT_ICEORYX2_PATH
+          export LD_LIBRARY_PATH="$IOX_DIR"
+          export DYLD_LIBRARY_PATH="$IOX_DIR"
+          export PATH="$IOX_DIR:$PATH"
+          "$BIN/weft-harness-command_subscriber" 4 &
+          sleep 2
+          "$BIN/weft-harness-command_publisher" 4
+
+  # Windows, on all three toolchains that matter there.
+  #
+  # A Windows caller may reasonably arrive with any of llvm-mingw, clang-cl or MSVC, and the
+  # generated dispatch table has to compile under all three or the choice becomes a hidden
+  # requirement. It did not: the generator writes __attribute__((weak)) on every forwarding
+  # declaration, so MSVC stopped at the first one with 'unknown override specifier'.
+  #
+  # src/stubgen_compat.h defines the attribute away under _MSC_VER. It is not load-bearing
+  # here -- Chromium marks the declaration weak so a directly linked real symbol can override
+  # the stub, and this repository never links iceoryx2 at all -- so on MSVC it becomes an
+  # ordinary extern.
+  #
+  # Building is not running. Each of the three runs the command/reply proof afterwards,
+  # because a table that compiles and does not dispatch is the failure this job exists to
+  # catch.
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [llvm-mingw, clang-cl, msvc]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QCBOR at the commit the manifest pins
+        run: |
+          git clone --no-checkout https://github.com/laurencelundblade/QCBOR.git libs/qcbor
+          git -C libs/qcbor checkout 930708bb86481e88879eb1d87fd4d664f1d69503
+
+      # iceoryx2 v0.9.3 creates its shared memory under a hardcoded C:\Temp and fails with no
+      # clear error when it is absent -- iceoryx2 issue 1868, closed after v0.9.3.
+      - name: iceoryx2's hardcoded C:\Temp
+        run: mkdir -p /c/Temp/iceoryx2/shm
+
+      - name: llvm-mingw
+        if: matrix.toolchain == 'llvm-mingw'
+        run: |
+          curl -sSL -o /tmp/llvm-mingw.zip \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20260812/llvm-mingw-20260812-ucrt-x86_64.zip
+          7z x -o/c/ /tmp/llvm-mingw.zip > /dev/null
+          echo "/c/llvm-mingw-20260812-ucrt-x86_64/bin" >> "$GITHUB_PATH"
+
+      # iceoryx2 is built before the MSVC environment is set up, not after. msvc-dev-cmd
+      # exports LIB, INCLUDE and a PATH for the C++ toolchain, and with those in scope rustc
+      # could not link its own build scripts: `linking with link.exe failed` while compiling
+      # `quote`, which is a proc-macro crate and nothing to do with this repository. The
+      # llvm-mingw leg does not run that action and built fine, which is what named the cause.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: iceoryx2 v0.9.3, built from source
+        run: |
+          git clone --depth 1 --branch v0.9.3 https://github.com/eclipse-iceoryx/iceoryx2.git /tmp/iceoryx2
+          cargo build --release -p iceoryx2-ffi-c --manifest-path /tmp/iceoryx2/Cargo.toml
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.toolchain != 'llvm-mingw'
+
+      - name: Build
+        run: |
+          case "${{ matrix.toolchain }}" in
+            llvm-mingw) CC=clang;    CXX=clang++   ;;
+            clang-cl)   CC=clang-cl; CXX=clang-cl  ;;
+            msvc)       CC=cl;       CXX=cl        ;;
+          esac
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX
+          cmake --build build -j
+
+      - name: Command/reply proof (DYNAMIC)
+        run: |
+          export WEFT_ICEORYX2_PATH=/tmp/iceoryx2/target/release/iceoryx2_ffi_c.dll
+          ./build/weft-harness-command_subscriber.exe 8 &
+          sleep 2
+          ./build/weft-harness-command_publisher.exe 8
+
+      - name: The fallback name, with no override
+        run: |
+          unset WEFT_ICEORYX2_PATH
+          export PATH="/tmp/iceoryx2/target/release:$PATH"
+          ./build/weft-harness-command_subscriber.exe 4 &
+          sleep 2
+          ./build/weft-harness-command_publisher.exe 4

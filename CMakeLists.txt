@@ -120,7 +120,11 @@ if(WEFT_HARNESS_PROOF)
     foreach(prog publisher subscriber bench_send command_publisher command_subscriber cbor_shape buffer_size)
         add_executable(weft-harness-${prog} proof/${prog}.cpp)
         target_link_libraries(weft-harness-${prog} PRIVATE weft::harness)
-        target_compile_options(weft-harness-${prog} PRIVATE -Wall -Wextra)
+        # cl.exe spells these /W4 and rejects -Wextra outright as an invalid numeric
+        # argument. clang-cl accepts the MSVC spelling, so the split is on the compiler's
+        # command-line dialect rather than on the platform.
+        target_compile_options(weft-harness-${prog} PRIVATE
+            $<IF:$<CXX_COMPILER_ID:MSVC>,/W4,-Wall -Wextra>)
     endforeach()
 endif()
 
@@ -140,6 +144,7 @@ if(WEFT_ICEORYX2_DIRECT)
             PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
         target_compile_definitions(weft-harness-bench-${link} PRIVATE WEFT_ICEORYX2_DIRECT)
         target_link_libraries(weft-harness-bench-${link} PRIVATE iceoryx2-c::${link}-lib)
-        target_compile_options(weft-harness-bench-${link} PRIVATE -Wall -Wextra)
+        target_compile_options(weft-harness-bench-${link} PRIVATE
+            $<IF:$<CXX_COMPILER_ID:MSVC>,/W4,-Wall -Wextra>)
     endforeach()
 endif()
